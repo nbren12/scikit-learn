@@ -6,6 +6,7 @@
 
 import warnings
 import numpy as np
+import scipy as sp
 
 from scipy import sparse
 from scipy.sparse.linalg import lobpcg
@@ -14,6 +15,7 @@ from scipy.sparse.linalg.eigen.lobpcg.lobpcg import symeig
 from ..base import BaseEstimator, TransformerMixin
 from ..externals import six
 from ..utils import check_random_state
+from ..utils.extmath import safe_sparse_dot
 from ..utils.validation import atleast2d_or_csr
 from ..utils.graph import graph_laplacian
 from ..utils._csgraph import cs_graph_components
@@ -120,8 +122,8 @@ def _set_diag(laplacian, value):
 def spectral_embedding(adjacency, n_components=8, eigen_solver=None,
                        random_state=None, eigen_tol=0.0,
                        norm_laplacian=True, drop_first=True,
-                       mode=None):
-    """Project the sample on the first eigen vectors of the graph Laplacian.
+                       mode=None, diffusion_time=None):
+    """Project the sample on the first eigen vectors of the graph Laplacian
 
     The adjacency matrix is used to compute a normalized graph Laplacian
     whose spectrum (especially the eigen vectors associated to the
@@ -304,10 +306,14 @@ def spectral_embedding(adjacency, n_components=8, eigen_solver=None,
             embedding = diffusion_map.T[:n_components] * dd
             if embedding.shape[0] == 1:
                 raise ValueError
-    if drop_first:
-        return embedding[1:n_components].T
+    if diffusion_time is None:
+        if drop_first:
+            return embedding[1:n_components].T
+        else:
+            return embedding[:n_components].T
     else:
-        return embedding[:n_components].T
+        Lt = np.diag(np.power(lambdas[:n_components], diffusion_time))
+        return np.dot(embedding[:n_components].T, Lt)
 
 
 class SpectralEmbedding(BaseEstimator, TransformerMixin):
@@ -486,3 +492,87 @@ class SpectralEmbedding(BaseEstimator, TransformerMixin):
         """
         self.fit(X)
         return self.embedding_
+
+
+class DiffusionEmbedding(SpectralEmbedding):
+    """Diffusion embedding for nonlinear dimensionality reduction
+    """
+    def __init__(self, diffusion_time=1., **kwargs):
+        super(DiffusionEmbedding, self).__init__(**kwargs)
+        self.diffusion_time = diffusion_time
+
+    def fit(self, X, y=None):
+        """Fit the model from data in X.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_features)
+            Training vector, where n_samples in the number of samples
+            and n_features is the number of features.
+
+            If affinity is "precomputed"
+            X : array-like, shape (n_samples, n_samples),
+            Interpret X as precomputed adjacency graph computed from
+            samples.
+
+        Returns
+        -------
+        self : object
+            Returns the instance itself.
+        """
+        self.random_state = check_random_state(self.random_state)
+        if isinstance(self.affinity, basestring):
+            if self.affinity not in set(("nearest_neighbors", "rbf",
+                                         "precomputed")):
+                raise ValueError(("%s is not a valid affinity. Expected "
+                                  "'precomputed', 'rbf', 'nearest_neighbors' "
+                                  "or a callable.") % self.affinity)
+        elif not hasattr(self.affinity, "__call__"):
+            raise ValueError(("'affinity' is expected to be an an affinity "
+                              "name or a callable. Got: %s") % self.affinity)
+
+        affinity_matrix = self._get_affinity_matrix(X)
+        self.embedding_ = spectral_embedding(affinity_matrix,
+                                             n_components=self.n_components,
+                                             eigen_solver=self.eigen_solver,
+                                             random_state=self.random_state,
+                                             diffusion_time=self.diffusion_time)
+        return self
+
+"""
+    if dimensionality is None:
+        min_dim = np.nonzero(np.power(l/l[1], diffusion_time) <=delta)[0]
+        if len(min_dim):
+            dimensionality = min_dim[0]
+        else:
+            dimensionality = len(l)
+        determined_param = ('dimensionality', dimensionality)
+    elif diffusion_time is None:
+        diffusion_time = np.log(delta) / np.log(l[dimensionality-1]/l[1])
+        determined_param = ('diffusion_time', diffusion_time)
+    elif delta is None:
+        delta = np.power(l[dimensionality-1]/l[1], diffusion_time)
+        determined_param = ('delta', delta)
+    else:
+        raise ValueError(('Either dimensionality, diffusion time or delta '
+                          'threshold must be left unspecified.'))
+
+    # this ensures that norm wrt stationary distribution (phi_0) is 1
+    norm_factor = np.sqrt(np.sum(d))
+
+    # construct left and right eigenvectors of stochastic matrix from
+    inv_sqrt_D = spdiags(sp.power(d, -0.5), 0, n_points, n_points)
+    sqrt_D = spdiags(sp.power(d, 0.5), 0, n_points, n_points)
+    Phi = safe_sparse_dot(sqrt_D, V[:, :dimensionality] / norm_factor)
+    Psi = norm_factor * safe_sparse_dot(inv_sqrt_D, V[:, :dimensionality])
+
+    # first right eigenvector should be constant positive, so if it isn't positive, we need to flip all eigenvectors
+    if Psi[0, 0] < 0:
+        Phi *= -1
+        Psi *= -1
+
+    # construct diffusion map coordinates
+    Lt = spdiags(sp.power(l[:dimensionality], diffusion_time), 0,
+                 dimensionality, dimensionality)
+    Gamma = safe_sparse_dot(Psi, Lt)
+"""
